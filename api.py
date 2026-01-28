@@ -1,14 +1,45 @@
 import asyncio
 import json
-from fastapi.responses import StreamingResponse
+import logging
+import time
+import datetime
+import docker
 import torch
-from runvirtual import PyAlgorithmExecutor, PyExecutor
-from tester import EvaluateContext, gen_data, TestResult, device
-from threading import Thread
+from data import ExecutionError
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from runvirtual import PyExecutor
+from tester import *
+from threading import Thread
 from pydantic import BaseModel
+from pathlib import Path
 from uuid import uuid4
+
+path_here = Path(__file__).parent
+path_log = path_here / "logs" / f"log-api.python.{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+path_log.parent.mkdir(parents=True, exist_ok=True)
+logger = logging.getLogger("api.algolexity")
+logger.setLevel(logging.DEBUG)
+fh = logging.FileHandler(path_log, encoding="utf-8")
+logger.addHandler(fh)
+
+
+
+# def predict_n(code: str) -> int:
+#     low = 1
+#     high = 100000
+#     while low < high:
+#         mid = (low + high + 1) // 2
+#         try:
+#             result = PyExecutor.run(code.format(n=mid), timeout=2.0, all=False)
+#             if result.error_type == "":
+#                 low = mid
+#             else:
+#                 high = mid - 1
+#         except TimeoutError:
+#             high = mid - 1
+#     return low
 
 app = FastAPI()
 app.add_middleware(
@@ -57,14 +88,14 @@ class EvaluateEvent(EvaluateContext):
         self.message("fit_end")
     
     def on_done(self, result: TestResult) -> None:
-        
         x_tensor = torch.Tensor(result.x).to(device)
         x_num = x_tensor.cpu().numpy()
-        dictionary = {"real_x": result.x.tolist(), "real_y": result.y.tolist(), }
+        dictionary = {"real_x": result.x.tolist(), "real_y": result.y.tolist()}
         model_predictions = {}
         for case in result.results:
             with torch.no_grad():
-                model_predictions[case.name] = case.model(x_tensor).cpu().numpy()
+                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                    model_predictions[case.name] = case.model(x_tensor).cpu().numpy()
         model_graph = []
         for i in range(len(x_num)):
             model_graph.append({
@@ -82,6 +113,15 @@ class EvaluateEvent(EvaluateContext):
         self.message("done")
         self.closed = True
 
+    def on_execution_error(self, error_type: str, error_message: str) -> None:
+        self.message("error", error_type=error_type, error_message=error_message)
+        self.closed = True
+    
+    def on_internal_error(self, error: Exception) -> None:
+        self.message("error", error_type=type(error).__name__, error_message=str(error))
+        print(f"Internal Error: {type(error).__name__}: {str(error)}")
+        self.closed = True
+
 class EvalRequest(BaseModel):
     code: str
 
@@ -91,11 +131,14 @@ async def event_generator(ctx: EvaluateEvent):
             yield await ctx.queue.get()
         await asyncio.sleep(0.05)
     
+
+        
+
 contexts = {}
 @app.post("/evaluate")
 async def post_evaluate_algorithm(request: EvalRequest):
     ctx = EvaluateEvent(asyncio.get_event_loop())
-    testing_thread = Thread(target=gen_data, args=(request.code, PyExecutor, 10000, ctx), daemon=False)
+    testing_thread = Thread(target=ExecutionError.wrap_ignore(gen_data), args=(request.code, PyExecutor, ctx, EvaluateSetting(target_n=range(1, 10001, 100))), daemon=False)
     testing_thread.start()
     uid = str(uuid4())
     contexts[uid] = ctx
@@ -116,6 +159,37 @@ async def sse_evaluate_algorithm(uuid: str):
         },
     )
 
+class TimedCache:
+    def __init__(self, timeout_seconds: int):
+        self.timeout_seconds = timeout_seconds
+        self.value = None
+        self.timestamp = 0
+
+    def has(self):
+        return (time.time() - self.timestamp) < self.timeout_seconds
+    def get(self):
+        return self.value
+    def set(self, value):
+        self.value = value
+        self.timestamp = time.time()
+
+CACHE_DOCKER_STATUS = TimedCache(timeout_seconds=3)
+@app.get("/status/docker")
+def find_docker_container():
+    if CACHE_DOCKER_STATUS.has():
+        return CACHE_DOCKER_STATUS.get()
+    client = docker.from_env()
+    containers = client.containers.list()  # running containers only
+    languages = ["python"]
+    available_languages = set()
+    for c in containers:
+        for lang in languages:
+            if any(tag.startswith(f"algolexity-{lang}") for tag in c.image.tags):
+                available_languages.add(lang)
+    response = {lang: (lang in available_languages) for lang in languages}
+    CACHE_DOCKER_STATUS.set(response)
+    return response
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("api:app", host="0.0.0.0", port=7004, reload=False)
+    uvicorn.run("api:app", host="0.0.0.0", port=7004, reload=False, proxy_headers=True, forwarded_allow_ips="*")

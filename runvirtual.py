@@ -44,10 +44,10 @@ class PyAlgorithmExecutor(AlgorithmExecutor):
         )
 
     @overload
-    def run(self, code: str, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
+    def run(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
     @overload
-    def run(self, code: str, all: Literal[False] = False) -> SandboxResult[int]: pass
-    def run(self, code: str, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]:
+    def run(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
+    def run(self, code: str, timeout: float = 5.0, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]:
         with tempfile.TemporaryFile(mode="w", dir=path_temp / "in", suffix=".py") as tmp:
             tmp.write(code)
             tmp.flush()
@@ -61,14 +61,15 @@ class PyAlgorithmExecutor(AlgorithmExecutor):
 
             path_json = path_temp / "out" / f"{Path(tmp.name).stem}.report.json"
             sleep_time = 0
-            while sleep_time < 5:
+
+            while sleep_time < timeout:
                 try:
                     report = parse_report(json.loads(path_json.read_text()))
                     break
                 except (FileNotFoundError, json.JSONDecodeError):
                     pass
-                time.sleep(0.05)
-                sleep_time += 0.05
+                time.sleep(0.04)
+                sleep_time += 0.04
             else:
                 
                 path_request.unlink(missing_ok=True)
@@ -83,6 +84,7 @@ class PyAlgorithmExecutor(AlgorithmExecutor):
                 result = SandboxResult(
                     data=AlgorithmScopeData.fromJson(
                         report.data if report.result == "success" else {"type": "module", "name": "<module>", "stack": []}),
+                    time=sleep_time,
                     error_type="",
                     error_message=""
                 )
@@ -90,6 +92,7 @@ class PyAlgorithmExecutor(AlgorithmExecutor):
                 assert type(report.data) == int
                 result = SandboxResult(
                     data=report.data if report.result == "success" else -1,
+                    time=sleep_time,
                     error_type="",
                     error_message=""
                 )
@@ -112,7 +115,7 @@ def func(n):
     return cnt
 func(100000)
 """
-    result = PyAlgorithmExecutor().run(code, True)
+    result = PyAlgorithmExecutor().run(code, all=True)
     if result.error_message:
         print("Error:", result.error_type, result.error_message)
     print(result.data.total_calls())

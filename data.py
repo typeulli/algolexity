@@ -46,19 +46,35 @@ class AlgorithmScopeData:
 @dataclass
 class SandboxResult(Generic[T]):    
     data: T
+    time: float
     error_type: str
     error_message: str
 
 class AlgorithmExecutor(metaclass=ABCMeta):
     @overload
-    def run(self, code: str, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
+    def run(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
     @overload
-    def run(self, code: str, all: Literal[False] = False) -> SandboxResult[int]: pass
+    def run(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
     @abstractmethod
-    def run(self, code: str, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]: pass
-    def __call__(self, code: str, all: bool = False):
-        return self.run(code, all=all)
+    def run(self, code: str, timeout: float, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]: pass
+    def __call__(self, code: str, timeout: float = 5.0, all: bool = False):
+        return self.run(code, timeout, all=all)
 
+
+class ExecutionError(Exception):
+    def __init__(self, error_type: str, error_message: str):
+        self.error_type = error_type
+        self.error_message = error_message
+        super().__init__(f"{error_type}: {error_message}")
+        
+    @classmethod
+    def wrap_ignore(cls, func):
+        def wrapper(*args, **kwargs):
+            try:
+                return func(*args, **kwargs)
+            except cls:
+                pass
+        return wrapper
 class EvaluateContext(metaclass=ABCMeta):
     @abstractmethod
     def on_track_start(self, total_calls: int) -> None: pass
@@ -78,6 +94,10 @@ class EvaluateContext(metaclass=ABCMeta):
     def on_complexity_fit_end(self) -> None: pass
     @abstractmethod
     def on_done(self, TestResult) -> None: pass
+    def on_execution_error(self, error_type: str, error_message: str) -> None:
+        raise ExecutionError(error_type, error_message)
+    def on_internal_error(self, error: Exception) -> None:
+        raise error
 
 @dataclass
 class AlgorithmExecutionReport:

@@ -1,28 +1,34 @@
 from abc import abstractmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Callable, Iterable
 from matplotlib import pyplot as plt
 import math
 import numpy as np
 import torch
 import torch.nn as nn
 
-from data import AlgorithmExecutor, AlgorithmScopeData, EvaluateContext
-from runvirtual import PyAlgorithmExecutor
+from data import AlgorithmExecutor, AlgorithmScopeData, EvaluateContext, ExecutionError
+from runvirtual import PyExecutor
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 class ComplexityModel(nn.Module):
     @abstractmethod
+    def prefit(self, x: np.ndarray, y: np.ndarray) -> None: pass
+    @abstractmethod
     def OString(self, mx: float = 1.0, my: float = 1.0) -> str: pass
 
 
 class ComplexityN(ComplexityModel):
-    def __init__(self, x, y):
+    def __init__(self):
         super().__init__()
-        slope = np.polyfit(x, y, 1)[0]
-        self.c = nn.Parameter(torch.tensor(slope))
+        self.c = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        
+    def prefit(self, x: np.ndarray, y: np.ndarray) -> None:
+        poly = np.polyfit(x, y, 1)
+        self.c = nn.Parameter(torch.tensor(poly[0]))
     
     def forward(self, x):
         return self.c * x
@@ -31,11 +37,18 @@ class ComplexityN(ComplexityModel):
         return f"O({self.c * mx * my:.2f}N)"
 
 class ComplexityLogN(ComplexityModel):
-    def __init__(self, x, y):
+    def __init__(self):
         super().__init__()
-        poly = np.polyfit(np.log2(x), y, 1)
-        self.c = nn.Parameter(torch.tensor(poly[0]))
-        self.b = nn.Parameter(torch.tensor(poly[1]))
+        self.c = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+    
+    def prefit(self, x: np.ndarray, y: np.ndarray) -> None:
+        lx = np.log2(x)
+
+        poly = np.polyfit(lx, y, 1)
+
+        self.c = nn.Parameter(torch.tensor(poly[0], dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(poly[1], dtype=torch.float32))
     
     def forward(self, x):
         return self.c * torch.log2(x) + self.b
@@ -44,11 +57,18 @@ class ComplexityLogN(ComplexityModel):
         return f"O({self.c * math.log2(mx) * my:.2f}log N)"
 
 class ComplexityNLogN(ComplexityModel):
-    def __init__(self, x, y):
+    def __init__(self):
         super().__init__()
-        poly = np.polyfit(x * np.log2(x), y, 1)
-        self.c = nn.Parameter(torch.tensor(poly[0]))
-        self.b = nn.Parameter(torch.tensor(poly[1]))
+        self.c = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+    
+    def prefit(self, x: np.ndarray, y: np.ndarray) -> None:
+        xlogx = x * np.log2(x)
+        
+        poly = np.polyfit(xlogx, y, 1)
+
+        self.c = nn.Parameter(torch.tensor(poly[0], dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(poly[1], dtype=torch.float32))
     
     def forward(self, x):
         return self.c * x * torch.log2(x) + self.b
@@ -57,12 +77,17 @@ class ComplexityNLogN(ComplexityModel):
         return f"O({self.c * mx * math.log2(mx) * my:.2f}N log N)"
 
 class ComplexityNSquared(ComplexityModel):
-    def __init__(self, x, y):
+    def __init__(self):
         super().__init__()
-        poly = np.polyfit(x**2, y, 2)
-        self.a = nn.Parameter(torch.tensor(poly[0]))
-        self.b = nn.Parameter(torch.tensor(poly[1]))
-        self.c = nn.Parameter(torch.tensor(poly[2]))
+        self.a = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+        self.c = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+        
+    def prefit(self, x: np.ndarray, y: np.ndarray) -> None:
+        poly = np.polyfit(x, y, 2)
+        self.a = nn.Parameter(torch.tensor(poly[0], dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(poly[1], dtype=torch.float32))
+        self.c = nn.Parameter(torch.tensor(poly[2], dtype=torch.float32))
     
     def forward(self, x):
         return self.a * x**2 + self.b * x + self.c
@@ -71,9 +96,13 @@ class ComplexityNSquared(ComplexityModel):
         return f"O({self.a * mx**2 * my:.2f}N^2)"
     
 class ComplexityConstant(ComplexityModel):
-    def __init__(self, x, y):
+    def __init__(self):
         super().__init__()
-        self.c = nn.Parameter(torch.tensor(np.mean(y)))
+        self.c = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        
+    
+    def prefit(self, x: np.ndarray, y: np.ndarray) -> None:
+        self.c = nn.Parameter(torch.tensor(np.mean(y), dtype=torch.float32))
     
     def forward(self, x):
         return self.c * torch.ones_like(x)
@@ -82,11 +111,18 @@ class ComplexityConstant(ComplexityModel):
         return f"O({self.c * my:.2f})"
 
 class ComplexitySqrtN(ComplexityModel):
-    def __init__(self, x, y):
+    def __init__(self):
         super().__init__()
-        poly = np.polyfit(np.sqrt(x), y, 1)
-        self.c = nn.Parameter(torch.tensor(poly[0]))
-        self.b = nn.Parameter(torch.tensor(poly[1]))
+        self.c = nn.Parameter(torch.tensor(1.0, dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(0.0, dtype=torch.float32))
+    
+    def prefit(self, x: np.ndarray, y: np.ndarray) -> None:
+        sx = np.sqrt(x)
+
+        poly = np.polyfit(sx, y, 1)
+
+        self.c = nn.Parameter(torch.tensor(poly[0], dtype=torch.float32))
+        self.b = nn.Parameter(torch.tensor(poly[1], dtype=torch.float32))
     
     def forward(self, x):
         return self.c * torch.sqrt(x) + self.b
@@ -107,12 +143,12 @@ def fit_complexity(x: np.ndarray, y: np.ndarray, ctx: EvaluateContext | None = N
     criterion = nn.SmoothL1Loss()
 
     candidates = {
-        "O(1)": ComplexityConstant(x, y),
-        "O(log n)": ComplexityLogN(x, y),
-        "O(sqrt n)": ComplexitySqrtN(x, y),
-        "O(n)": ComplexityN(x, y),
-        "O(n log n)": ComplexityNLogN(x, y),
-        "O(n^2)": ComplexityNSquared(x, y),
+        "O(1)": ComplexityConstant(),
+        "O(log n)": ComplexityLogN(),
+        "O(sqrt n)": ComplexitySqrtN(),
+        "O(n)": ComplexityN(),
+        "O(n log n)": ComplexityNLogN(),
+        "O(n^2)": ComplexityNSquared(),
     }
 
     results = []
@@ -120,13 +156,15 @@ def fit_complexity(x: np.ndarray, y: np.ndarray, ctx: EvaluateContext | None = N
     x_tensor = torch.tensor(x, dtype=torch.float32).to(device)
     y_tensor = torch.tensor(y, dtype=torch.float32).to(device)
 
+    scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
+
     LEARN_LIMIT_PER_MODEL = 1000
     if ctx:
         ctx.on_complexity_fit_start(len(candidates), LEARN_LIMIT_PER_MODEL)
     for name, model in candidates.items():
         if ctx:
             ctx.on_complexity_fit_enter_model(len(results), name)
-        
+        model.prefit(x, y)
         model = model.to(device)
         model.train()
         optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -135,10 +173,14 @@ def fit_complexity(x: np.ndarray, y: np.ndarray, ctx: EvaluateContext | None = N
         last_loss = float('inf')
         for epoch in range(LEARN_LIMIT_PER_MODEL):
             optimizer.zero_grad()
-            y_pred = model(x_tensor)
-            loss = criterion(y_pred, y_tensor)
-            loss.backward()
-            optimizer.step()
+            
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                y_pred = model(x_tensor)
+                loss = criterion(y_pred, y_tensor)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
             cur_loss = loss.item()
             if stage == 0 and abs(last_loss - cur_loss) < 1e-5:
                 optimizer.param_groups[0]['lr'] *= 0.1
@@ -156,7 +198,8 @@ def fit_complexity(x: np.ndarray, y: np.ndarray, ctx: EvaluateContext | None = N
 
         model.eval()
         with torch.no_grad():
-            y_pred = model(x_tensor)
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                y_pred = model(x_tensor)
             error = torch.mean((y_pred - y_tensor) ** 2).item()
             results.append(ComplexityFitResult(name, model, error))
     if ctx:
@@ -177,32 +220,47 @@ class TestResult:
     def multiplier_y(self) -> float:
         return 1.0 / self.normalizer_y
 
-
 def run_one(track: AlgorithmExecutor, code: str, i: int) -> tuple[int, int]:
-    cnt = track(code).data
+    report = track(code, all=False)
+    if report.error_type != "":
+        raise ExecutionError(report.error_type, report.error_message)
+    cnt = report.data
     if type(cnt) == int:
         return i, cnt
     else:
         assert type(cnt) == AlgorithmScopeData
         return i, cnt.total_calls()
-def gen_data(code: str, track: AlgorithmExecutor, n: int, ctx: EvaluateContext | None = None) -> TestResult:
-    x = np.arange(1, n+1, n//100 if n >= 100 else n)
+
+@dataclass
+class EvaluateSetting:
+    target_n: Iterable[int] = field(default_factory=lambda: range(1, 10001, 100))
+
+def gen_data(code: str, track: AlgorithmExecutor, ctx: EvaluateContext | None = None, setting: EvaluateSetting | None = None) -> TestResult:
+    eval_setting = setting if setting is not None else EvaluateSetting()
+    x = np.array(eval_setting.target_n, dtype=np.int32)
     
     if ctx:
         ctx.on_track_start(len(x))
     y = [0] * len(x)
 
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [
-            executor.submit(run_one, track, code.format(n=n), i)
-            for i, n in enumerate(x)
-        ]
+    try:
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = [
+                executor.submit(run_one, track, code.format(n=n), i)
+                for i, n in enumerate(x)
+            ]
 
-        for future in as_completed(futures):
-            i, cnt = future.result(timeout=6)
-            y[i] = cnt
-            if ctx:
-                ctx.on_track(i, cnt)
+            for future in as_completed(futures):
+                i, cnt = future.result(timeout=6)
+                y[i] = cnt
+                if ctx:
+                    ctx.on_track(i, cnt)
+    except ExecutionError as e:
+        if ctx: ctx.on_execution_error(e.error_type, e.error_message)
+        raise e
+    except Exception as e:
+        if ctx: ctx.on_internal_error(e)
+        raise e
     if ctx:
         ctx.on_track_end()
     normalizer_x = float(1.0 / max(x))
@@ -257,7 +315,7 @@ def func(n):
 func({n})
     """
     code = code_nlogn
-    test_result = gen_data(code, PyAlgorithmExecutor(), 10000)
+    test_result = gen_data(code, PyExecutor, 10000)
     x = test_result.x
     y = test_result.y
     results = test_result.results

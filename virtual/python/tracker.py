@@ -2,8 +2,33 @@ import ast
 import json
 from multiprocessing import Process
 from pathlib import Path
-from typing import TypedDict
+from typing import Callable, TypedDict
 from data import AlgorithmScopeData
+
+def count_stmt(node: ast.expr) -> int:
+    match type(node):
+        case ast.BinOp:
+            assert type(node) == ast.BinOp
+            return count_stmt(node.left) + count_stmt(node.right) + 1
+        case ast.UnaryOp:
+            assert type(node) == ast.UnaryOp
+            return count_stmt(node.operand) + 1
+        case ast.Call:
+            assert type(node) == ast.Call
+            total = 0
+            for arg in node.args:
+                total += count_stmt(arg)
+            for keyword in node.keywords:
+                total += count_stmt(keyword.value)
+            return total
+        case ast.Attribute:
+            assert type(node) == ast.Attribute
+            return count_stmt(node.value) + 1
+        case ast.Subscript:
+            assert type(node) == ast.Subscript
+            return count_stmt(node.value) + count_stmt(node.slice) + 1
+        case _:
+            return 0
 
 class InstrumentingVisitor(ast.NodeTransformer):
     def make_on_call(self, n):
@@ -44,7 +69,7 @@ class InstrumentingVisitor(ast.NodeTransformer):
         for stmt in stmts:
             if isinstance(stmt, ast.Assign) or isinstance(stmt, ast.AugAssign):
                 new_body.append(stmt)
-                counts += 1
+                counts += 1 + count_stmt(stmt.value)
             elif type(stmt) in (ast.Return, ast.Raise, ast.Break, ast.Continue):
                 flush()
                 new_body.append(self.make_on_scope_exit())
@@ -55,7 +80,7 @@ class InstrumentingVisitor(ast.NodeTransformer):
             else:
                 flush()
                 new_body.append(stmt)
-                counts += 1
+                counts += count_stmt(stmt)
                 flush()
 
         flush()
@@ -139,6 +164,9 @@ def pyTrack(code: str, compact: bool) -> AlgorithmTracker:
 class Setting(TypedDict):
     target: str
     request_all: bool
+    callback: Callable[[dict], None]
+
+
 def _run(code: str, setting: Setting) -> None:
     result = {}
     try:
@@ -154,8 +182,7 @@ def _run(code: str, setting: Setting) -> None:
             "message": type(e).__name__ + ":" + str(e),
             "data": {} if setting["request_all"] else -1
         }
-    (path_here / "out" / f"{setting['target']}.report.json").parent.mkdir(parents=True, exist_ok=True)
-    (path_here / "out" / f"{setting['target']}.report.json").write_text(json.dumps(result))
+    setting["callback"](result)
 
 path_here = Path(__file__).parent.resolve()
 
@@ -164,14 +191,17 @@ if __name__ == "__main__":
     path_here = Path(__file__).parent
     path_log = path_here / "out" / "log.python.txt"
 
+    (path_here / "out").mkdir(parents=True, exist_ok=True)
     while True:
         for path_request in (path_here / "in").glob("*.request.json"):
             try:
-                setting = {"target": "", "request_all": False}
+                setting = {"target": "", "request_all": False, "callback": lambda x: None}
                 setting.update(json.loads(path_request.read_text()))
 
                 if not setting["target"]:
                     continue
+                
+                setting["callback"] = lambda result: (path_here / "out" / f"{setting['target']}.report.json").write_text(json.dumps(result))
 
                 path_target = path_here / "in" / f"{setting['target']}.py"
                 code = path_target.read_text()
