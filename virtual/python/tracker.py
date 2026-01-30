@@ -1,5 +1,6 @@
 import ast
 import json
+import logging
 from multiprocessing import Process
 from pathlib import Path
 from typing import Callable, TypedDict
@@ -160,17 +161,19 @@ def pyTrack(code: str, compact: bool) -> AlgorithmTracker:
     return tracker
 
 
-
 class Setting(TypedDict):
     target: str
     request_all: bool
-    callback: Callable[[dict], None]
+
+while True:
+    data = input()
+    setting: Setting = {"request_all": False, "code": ""}
+    setting.update(json.loads(data.strip()))
 
 
-def _run(code: str, setting: Setting) -> None:
     result = {}
     try:
-        tracker = pyTrack(code, compact = not setting["request_all"])
+        tracker = pyTrack(setting["code"], compact = not setting["request_all"])
         result = {
             "result": "success",
             "message": "",
@@ -182,41 +185,5 @@ def _run(code: str, setting: Setting) -> None:
             "message": type(e).__name__ + ":" + str(e),
             "data": {} if setting["request_all"] else -1
         }
-    setting["callback"](result)
-
-path_here = Path(__file__).parent.resolve()
-
-
-if __name__ == "__main__":
-    path_here = Path(__file__).parent
-    path_log = path_here / "out" / "log.python.txt"
-
-    (path_here / "out").mkdir(parents=True, exist_ok=True)
-    while True:
-        for path_request in (path_here / "in").glob("*.request.json"):
-            try:
-                setting = {"target": "", "request_all": False, "callback": lambda x: None}
-                setting.update(json.loads(path_request.read_text()))
-
-                if not setting["target"]:
-                    continue
-                
-                setting["callback"] = lambda result: (path_here / "out" / f"{setting['target']}.report.json").write_text(json.dumps(result))
-
-                path_target = path_here / "in" / f"{setting['target']}.py"
-                code = path_target.read_text()
-
-                p = Process(
-                    target=_run,
-                    args=(code, setting),
-                    daemon=True
-                )
-                p.start()
-
-            except Exception as e:
-                path_log.parent.mkdir(parents=True, exist_ok=True)
-                with path_log.open("a", encoding="utf-8") as f:
-                    f.write(
-                        f"Error processing {path_request}: "
-                        f"{type(e).__name__}:{e}\n"
-                    )
+    dumped = json.dumps(result)
+    print(dumped)

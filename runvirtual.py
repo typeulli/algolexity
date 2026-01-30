@@ -1,6 +1,6 @@
 from pathlib import Path
-from typing import Literal, overload
-from data import AlgorithmExecutor, AlgorithmScopeData, SandboxResult, parse_report
+from typing import Literal, overload, Self
+from data import AlgorithmExecutor, AlgorithmScopeData, SandboxResult, parse_report, log_process, ExecutionError, AlgorithmSession
 
 import json
 import subprocess
@@ -11,6 +11,92 @@ path_here = Path(__file__).parent.resolve()
 path_temp = path_here / "temp"
 if not path_temp.exists():
     path_temp.mkdir(parents=True, exist_ok=True)
+
+class PyAlgorithmSession(AlgorithmSession["PyAlgorithmExecutor"]):
+    def __init__(self, executor: "PyAlgorithmExecutor", uid: str) -> None:
+        super().__init__(executor, uid)
+
+    def open(self) -> None:
+        path = (path_temp / "python" / f"{self.uid}.open")
+        path.write_text("open")
+        while path.exists():
+            time.sleep(0.01)
+        
+    def close(self) -> None:
+        path = (path_temp / "python" / f"{self.uid}.close")
+        path.write_text("close")
+        while path.exists():
+            time.sleep(0.01)
+    
+    @overload
+    def run(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
+    @overload
+    def run(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
+    def run(self, code: str, timeout: float = 5.0, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]:
+        with tempfile.TemporaryFile(mode="w", dir=path_temp / "python", suffix=".py") as tmp:
+            tmp.write(code)
+            tmp.flush()
+
+            path_request = path_temp / "python" / f"{Path(tmp.name).stem}.request.json"
+            path_request.write_text(json.dumps({
+                "target": Path(tmp.name).stem,
+                "session": self.uid,
+                "request_all": all,
+                "stdin": "",
+                
+            }))
+
+
+            path_json = path_temp / "python" / f"{Path(tmp.name).stem}.report.json"
+            sleep_time = 0
+
+            while sleep_time < timeout:
+                try:
+                    raw_data = json.loads(path_json.read_text())
+                    report = parse_report(raw_data)
+                    break
+                except json.JSONDecodeError:
+                    time.sleep(0.01)
+                    sleep_time += 0.01
+                except FileNotFoundError:
+                    time.sleep(0.03)
+                    sleep_time += 0.03
+            else:
+                path_json.unlink(missing_ok=True)
+                raise TimeoutError("Timeout waiting for sandboxed code execution.")
+            time.sleep(0.01)
+            path_json.unlink(missing_ok=False)
+            
+            if report.result == "error_internal":
+                print(raw_data)
+                raise ExecutionError("InternalError", report.message)
+            elif report.result == "error":
+                result = SandboxResult(
+                    data = -1,
+                    time = sleep_time,
+                    error_type = report.message.split(":", 1)[0],
+                    error_message = ":".join(report.message.split(":", 1)[1:]) if ":" in report.message else ""
+                )
+            elif report.result == "timeout":
+                raise TimeoutError("Sandboxed code execution timeout.")
+            elif all:
+                assert type(report.data) == dict
+                result = SandboxResult(
+                    data=AlgorithmScopeData.fromJson(
+                        report.data if report.result == "success" else {"type": "module", "name": "<module>", "stack": []}),
+                    time=sleep_time,
+                    error_type="",
+                    error_message=""
+                )
+            else:
+                assert type(report.data) == int, raw_data
+                result = SandboxResult(
+                    data=report.data if report.result == "success" else -1,
+                    time=sleep_time,
+                    error_type="",
+                    error_message=""
+                )
+            return result
 
 class PyAlgorithmExecutor(AlgorithmExecutor):
     instance: "PyAlgorithmExecutor | None" = None
@@ -28,10 +114,10 @@ class PyAlgorithmExecutor(AlgorithmExecutor):
             "--cpus=4",
             "--pids-limit=64",
             "--read-only",
-            "-v", f"{path_temp / 'in'}:/sandbox/in:ro",
             "-v", f"{(path_here / 'virtual' / 'python' / 'tracker.py')}:/sandbox/tracker.py:ro",
+            "-v", f"{(path_here / 'virtual' / 'python' / 'handler.py')}:/sandbox/handler.py:ro",
             "-v", f"{(path_here / 'data.py')}:/sandbox/data.py:ro",
-            "-v", f"{path_temp / 'out'}:/sandbox/out:rw",
+            "-v", f"{path_temp / 'python'}:/sandbox/stream:rw",
             "algolexity-python"
         ]
 
@@ -42,65 +128,13 @@ class PyAlgorithmExecutor(AlgorithmExecutor):
             stderr=subprocess.PIPE,
             text=True
         )
-
-    @overload
-    def run(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
-    @overload
-    def run(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
-    def run(self, code: str, timeout: float = 5.0, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]:
-        with tempfile.TemporaryFile(mode="w", dir=path_temp / "in", suffix=".py") as tmp:
-            tmp.write(code)
-            tmp.flush()
-
-            path_request = path_temp / "in" / f"{Path(tmp.name).stem}.request.json"
-            path_request.write_text(json.dumps({
-                "target": Path(tmp.name).stem,
-                "request_all": all
-            }))
-
-
-            path_json = path_temp / "out" / f"{Path(tmp.name).stem}.report.json"
-            sleep_time = 0
-
-            while sleep_time < timeout:
-                try:
-                    report = parse_report(json.loads(path_json.read_text()))
-                    break
-                except (FileNotFoundError, json.JSONDecodeError):
-                    pass
-                time.sleep(0.04)
-                sleep_time += 0.04
-            else:
-                
-                path_request.unlink(missing_ok=True)
-                path_json.unlink(missing_ok=True)
-                raise TimeoutError("Timeout waiting for sandboxed code execution.")
-            path_request.unlink(missing_ok=True)
-            time.sleep(0.1)
-            path_json.unlink(missing_ok=False)
-            
-            if all:
-                assert type(report.data) == dict
-                result = SandboxResult(
-                    data=AlgorithmScopeData.fromJson(
-                        report.data if report.result == "success" else {"type": "module", "name": "<module>", "stack": []}),
-                    time=sleep_time,
-                    error_type="",
-                    error_message=""
-                )
-            else:
-                assert type(report.data) == int
-                result = SandboxResult(
-                    data=report.data if report.result == "success" else -1,
-                    time=sleep_time,
-                    error_type="",
-                    error_message=""
-                )
-            if report.result == "error":
-                result.error_type = report.message.split(":", 1)[0]
-                result.error_message = ":".join(report.message.split(":", 1)[1:]) if ":" in report.message else ""
-            return result
-                
+        
+        log_process(self.process)
+    
+    def session(self, uid: str) -> AlgorithmSession[Self]:
+        return PyAlgorithmSession(self, uid)
+        
+        
 PyExecutor = PyAlgorithmExecutor()
 
 

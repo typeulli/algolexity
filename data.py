@@ -1,6 +1,9 @@
 from abc import ABCMeta, abstractmethod
 from dataclasses import dataclass
-from typing import Generic, Literal, TypeVar, overload
+from subprocess import Popen
+from typing import Generic, Iterable, Literal, TypeVar, overload, Self
+from threading import Thread
+import time
 
 T = TypeVar("T")
 
@@ -50,15 +53,42 @@ class SandboxResult(Generic[T]):
     error_type: str
     error_message: str
 
-class AlgorithmExecutor(metaclass=ABCMeta):
-    @overload
-    def run(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
-    @overload
-    def run(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
+def log_process(process: Popen) -> None:
+    def report() -> None:
+        while True:
+            stdout, stderr = process.communicate()
+            if stderr:
+                print("Sandbox stderr:", stderr)
+            time.sleep(1)
+            
+    Thread(target=report, daemon=True).start()
+
+Executor = TypeVar("Executor", bound="AlgorithmExecutor")
+class AlgorithmSession(Generic[Executor], metaclass=ABCMeta):
+    def __init__(self, executor: Executor, uid: str) -> None:
+        self.executor = executor
+        self.uid = uid
     @abstractmethod
-    def run(self, code: str, timeout: float, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]: pass
-    def __call__(self, code: str, timeout: float = 5.0, all: bool = False):
+    def open(self) -> None: pass
+    @abstractmethod
+    def close(self) -> None: pass
+    def __enter__(self):
+        self.open()
+        return self
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+    @overload
+    def run(self, code: Iterable[str], timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
+    @overload
+    def run(self, code: Iterable[str], timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
+    @abstractmethod
+    def run(self, code: Iterable[str], timeout: float, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]: pass
+    def __call__(self, code: Iterable[str], timeout: float = 5.0, all: bool = False):
         return self.run(code, timeout, all=all)
+    
+class AlgorithmExecutor(metaclass=ABCMeta):
+    @abstractmethod
+    def session(self, uid: str) -> AlgorithmSession[Self]: pass
 
 
 class ExecutionError(Exception):
@@ -75,6 +105,7 @@ class ExecutionError(Exception):
             except cls:
                 pass
         return wrapper
+
 class EvaluateContext(metaclass=ABCMeta):
     @abstractmethod
     def on_track_start(self, total_calls: int) -> None: pass

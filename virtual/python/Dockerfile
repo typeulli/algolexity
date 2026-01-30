@@ -5,4 +5,4 @@ RUN useradd -m sandbox
 WORKDIR /sandbox
 USER sandbox
 
-CMD ["python3", "/sandbox/tracker.py"]
+CMD ["python3", "/sandbox/handler.py"]

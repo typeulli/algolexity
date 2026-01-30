@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 from matplotlib import pyplot as plt
+from uuid import uuid4
 import math
 import numpy as np
 import torch
@@ -220,20 +221,11 @@ class TestResult:
     def multiplier_y(self) -> float:
         return 1.0 / self.normalizer_y
 
-def run_one(track: AlgorithmExecutor, code: str, i: int) -> tuple[int, int]:
-    report = track(code, all=False)
-    if report.error_type != "":
-        raise ExecutionError(report.error_type, report.error_message)
-    cnt = report.data
-    if type(cnt) == int:
-        return i, cnt
-    else:
-        assert type(cnt) == AlgorithmScopeData
-        return i, cnt.total_calls()
 
 @dataclass
 class EvaluateSetting:
-    target_n: Iterable[int] = field(default_factory=lambda: range(1, 10001, 100))
+    target_n: Iterable[int] = field(default_factory=lambda: range(1, 1001, 100))
+    uid: str = field(default_factory=lambda: str(uuid4()))
 
 def gen_data(code: str, track: AlgorithmExecutor, ctx: EvaluateContext | None = None, setting: EvaluateSetting | None = None) -> TestResult:
     eval_setting = setting if setting is not None else EvaluateSetting()
@@ -244,17 +236,23 @@ def gen_data(code: str, track: AlgorithmExecutor, ctx: EvaluateContext | None = 
     y = [0] * len(x)
 
     try:
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [
-                executor.submit(run_one, track, code.format(n=n), i)
-                for i, n in enumerate(x)
-            ]
-
-            for future in as_completed(futures):
-                i, cnt = future.result(timeout=6)
-                y[i] = cnt
-                if ctx:
-                    ctx.on_track(i, cnt)
+        with track.session(eval_setting.uid) as session:
+            for i, n in enumerate(x):
+                code_run = code.format(n=n)
+                report = session(code_run, all=False)
+                if report.error_type != "":
+                    raise ExecutionError(report.error_type, report.error_message)
+                cnt = report.data
+                if type(cnt) == int:
+                    if ctx:
+                        ctx.on_track(i, cnt)
+                    y[i] = cnt
+                else:
+                    assert type(cnt) == AlgorithmScopeData
+                    if ctx:
+                        ctx.on_track(i, cnt)
+                    y[i] = cnt.total_calls()
+                    
     except ExecutionError as e:
         if ctx: ctx.on_execution_error(e.error_type, e.error_message)
         raise e
