@@ -3,7 +3,7 @@ import json
 import logging
 import time
 import datetime
-import docker
+import docker # type: ignore
 import torch
 from data import ExecutionError
 from fastapi import FastAPI
@@ -94,7 +94,7 @@ class EvaluateEvent(EvaluateContext):
         model_predictions = {}
         for case in result.results:
             with torch.no_grad():
-                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
+                with torch.amp.autocast("cuda", enabled=(device.type == "cuda")): # type: ignore[PylancereportPrivateImportUsage]
                     model_predictions[case.name] = case.model(x_tensor).cpu().numpy()
         model_graph = []
         for i in range(len(x_num)):
@@ -134,7 +134,7 @@ async def event_generator(ctx: EvaluateEvent):
 
         
 
-contexts = {}
+contexts: dict[str, EvaluateEvent] = {}
 @app.post("/evaluate")
 async def post_evaluate_algorithm(request: EvalRequest):
     ctx = EvaluateEvent(asyncio.get_event_loop())

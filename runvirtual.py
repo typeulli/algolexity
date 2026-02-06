@@ -32,7 +32,7 @@ class PyAlgorithmSession(AlgorithmSession["PyAlgorithmExecutor"]):
     def run(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
     @overload
     def run(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
-    def run(self, code: str, timeout: float = 5.0, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]:
+    def run(self, code: str, timeout: float, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]:
         with tempfile.TemporaryFile(mode="w", dir=path_temp / "python", suffix=".py") as tmp:
             tmp.write(code)
             tmp.flush()
@@ -48,19 +48,19 @@ class PyAlgorithmSession(AlgorithmSession["PyAlgorithmExecutor"]):
 
 
             path_json = path_temp / "python" / f"{Path(tmp.name).stem}.report.json"
-            sleep_time = 0
+            sleep_time: float = 0
 
             while sleep_time < timeout:
+                if not path_json.exists():
+                    time.sleep(0.01)
+                    sleep_time += 0.01
+                    continue
                 try:
                     raw_data = json.loads(path_json.read_text())
                     report = parse_report(raw_data)
                     break
                 except json.JSONDecodeError:
-                    time.sleep(0.01)
-                    sleep_time += 0.01
-                except FileNotFoundError:
-                    time.sleep(0.03)
-                    sleep_time += 0.03
+                    pass
             else:
                 path_json.unlink(missing_ok=True)
                 raise TimeoutError("Timeout waiting for sandboxed code execution.")
@@ -80,18 +80,18 @@ class PyAlgorithmSession(AlgorithmSession["PyAlgorithmExecutor"]):
             elif report.result == "timeout":
                 raise TimeoutError("Sandboxed code execution timeout.")
             elif all:
-                assert type(report.data) == dict
+                assert type(report.data_call) == dict
                 result = SandboxResult(
                     data=AlgorithmScopeData.fromJson(
-                        report.data if report.result == "success" else {"type": "module", "name": "<module>", "stack": []}),
+                        report.data_call if report.result == "success" else {"type": "module", "name": "<module>", "stack": []}),
                     time=sleep_time,
                     error_type="",
                     error_message=""
                 )
             else:
-                assert type(report.data) == int, raw_data
+                assert type(report.data_call) == int, raw_data
                 result = SandboxResult(
-                    data=report.data if report.result == "success" else -1,
+                    data=report.data_call if report.result == "success" else -1,
                     time=sleep_time,
                     error_type="",
                     error_message=""
@@ -131,7 +131,7 @@ class PyAlgorithmExecutor(AlgorithmExecutor):
         
         log_process(self.process)
     
-    def session(self, uid: str) -> AlgorithmSession[Self]:
+    def session(self, uid: str) -> AlgorithmSession["PyAlgorithmExecutor"]:
         return PyAlgorithmSession(self, uid)
         
         
@@ -149,7 +149,8 @@ def func(n):
     return cnt
 func(100000)
 """
-    result = PyAlgorithmExecutor().run(code, all=True)
-    if result.error_message:
-        print("Error:", result.error_type, result.error_message)
-    print(result.data.total_calls())
+    with PyExecutor.session("test") as session:
+        result = session.run(code, 5.0, all=True)
+        if result.error_message:
+            print("Error:", result.error_type, result.error_message)
+        print(result.data.total_calls())

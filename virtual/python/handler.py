@@ -25,8 +25,7 @@ def wrap_exception(func):
     return wrapper
 @wrap_exception
 def _run(data: str) -> None:
-    data = json.loads(data)
-    stdin = data["stdin"]
+    stdin = data.get("stdin", "")
     name = data['target']
     session = data['session']
     data["code"] = Path(path_here / "stream" / f"{name}.py").read_text(encoding="utf-8")
@@ -103,6 +102,12 @@ if __name__ == "__main__":
         for path_request in (path_here / "stream").glob("*.request.json"):
             if not path_request.exists():
                 continue
-            data = path_request.read_text()
+            while True:
+                try:
+                    data = json.loads(path_request.read_text())
+                    break
+                except json.JSONDecodeError:
+                    time.sleep(0.005)
+                    continue
             Thread(target=_run, args=(data,), daemon=True).start()
             path_request.unlink()

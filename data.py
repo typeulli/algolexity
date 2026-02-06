@@ -34,7 +34,7 @@ class AlgorithmScopeData:
     
     @classmethod
     def fromJson(cls, json_data: dict) -> "AlgorithmScopeData":
-        stack = []
+        stack: list[AlgorithmScopeData | int] = []
         for item in json_data.get("stack", []):
             if isinstance(item, dict):
                 stack.append(cls.fromJson(item))
@@ -78,12 +78,19 @@ class AlgorithmSession(Generic[Executor], metaclass=ABCMeta):
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
     @overload
-    def run(self, code: Iterable[str], timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
+    def run(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: pass
     @overload
-    def run(self, code: Iterable[str], timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
+    def run(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: pass
+    @overload
+    def run(self, code: str, timeout: float, all: bool) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]: ...
     @abstractmethod
-    def run(self, code: Iterable[str], timeout: float, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]: pass
-    def __call__(self, code: Iterable[str], timeout: float = 5.0, all: bool = False):
+    def run(self, code: str, timeout: float, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]: pass
+
+    @overload
+    def __call__(self, code: str, timeout: float, all: Literal[True]) -> SandboxResult[AlgorithmScopeData]: ...
+    @overload
+    def __call__(self, code: str, timeout: float, all: Literal[False] = False) -> SandboxResult[int]: ...
+    def __call__(self, code: str, timeout: float, all: bool = False) -> SandboxResult[AlgorithmScopeData] | SandboxResult[int]:
         return self.run(code, timeout, all=all)
     
 class AlgorithmExecutor(metaclass=ABCMeta):
@@ -129,16 +136,29 @@ class EvaluateContext(metaclass=ABCMeta):
         raise ExecutionError(error_type, error_message)
     def on_internal_error(self, error: Exception) -> None:
         raise error
+    
+class EmptyEvaluateContext(EvaluateContext):
+    def on_track_start(self, total_calls: int) -> None: pass
+    def on_track(self, idx: int, n: int) -> None: pass
+    def on_track_end(self) -> None: pass
+    def on_complexity_fit_start(self, model_cnt: int, epoch_per_model: int) -> None: pass
+    def on_complexity_fit_enter_model(self, idx: int, model_name: str) -> None: pass
+    def on_complexity_fit_train_step(self, epoch: int, loss: float) -> None: pass
+    def on_complexity_fit_exit_model(self, idx: int, model_name: str, error: float) -> None: pass
+    def on_complexity_fit_end(self) -> None: pass
+    def on_done(self, TestResult) -> None: pass
 
 @dataclass
 class AlgorithmExecutionReport:
-    result: Literal["success", "error"]
+    result: Literal["success", "error", "error_internal", "timeout"]
     message: str
-    data: int | dict
+    data_call: int | dict
+    data_memory: int = -1
 
 def parse_report(json_data: dict) -> AlgorithmExecutionReport:
     return AlgorithmExecutionReport(
         result=json_data.get("result", "error"),
         message=json_data.get("message", ""),
-        data=json_data.get("data", 0)
+        data_call=json_data.get("data", {}).get("calls", -1),
+        data_memory=json_data.get("data", {}).get("memory", -1)
     )

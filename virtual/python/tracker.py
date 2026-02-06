@@ -1,9 +1,7 @@
 import ast
 import json
-import logging
-from multiprocessing import Process
-from pathlib import Path
-from typing import Callable, TypedDict
+import resource
+from typing import TypedDict
 from data import AlgorithmScopeData
 
 def count_stmt(node: ast.expr) -> int:
@@ -150,6 +148,7 @@ class AlgorithmTracker:
             self.current_scope.stack[-1] += n
         else:
             self.current_scope.stack.append(n)
+        
 
 def pyTrack(code: str, compact: bool) -> AlgorithmTracker:
     tree = ast.parse(code)
@@ -160,30 +159,43 @@ def pyTrack(code: str, compact: bool) -> AlgorithmTracker:
     exec(compile(tree, filename="<ast>", mode="exec"), {'on_scope_enter': tracker.on_scope_enter, 'on_scope_exit': tracker.on_scope_exit, 'on_call': tracker.on_call})
     return tracker
 
+class TrackerError(Exception):
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
 
 class Setting(TypedDict):
-    target: str
-    request_all: bool
+    code: str
+    framed_call_info: bool
+    memory_info: bool
 
 while True:
     data = input()
-    setting: Setting = {"request_all": False, "code": ""}
+    setting: Setting = {"code": "", "framed_call_info": False, "memory_info": True}
     setting.update(json.loads(data.strip()))
 
 
     result = {}
     try:
-        tracker = pyTrack(setting["code"], compact = not setting["request_all"])
+        if setting["memory_info"] and setting["framed_call_info"]:
+            raise TrackerError("Cannot enable both framed_call_info and memory_info.")
+        tracker = pyTrack(setting["code"], compact = not setting["framed_call_info"])
+        memory_data = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss if setting["memory_info"] else -1
         result = {
             "result": "success",
             "message": "",
-            "data": tracker.module_scope.toJson() if setting["request_all"] else tracker.module_scope.total_calls()
+            "data": {
+                "calls": tracker.module_scope.toJson() if setting["framed_call_info"] else tracker.module_scope.total_calls(),
+                "memory": memory_data
+            }
         }
     except Exception as e:
         result = {
             "result": "error",
             "message": type(e).__name__ + ":" + str(e),
-            "data": {} if setting["request_all"] else -1
+            "data": {
+                "calls": {} if setting["framed_call_info"] else -1,
+                "memory": memory_data
+            }
         }
     dumped = json.dumps(result)
     print(dumped)
